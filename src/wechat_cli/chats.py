@@ -224,13 +224,22 @@ def open_chat(name: str) -> dict:
     return out
 
 
+def _is_highlight(c) -> bool:
+    # WeChat's selected-row green is about (0.30, 0.73, 0.43); the list background is grey.
+    return (c is not None and c.greenComponent() > 0.6 and c.greenComponent() - c.redComponent() > 0.25
+            and c.greenComponent() - c.blueComponent() > 0.2)
+
+
 def _selected_row(lines: list[Line], g: dict, bmp) -> str | None:
-    """Name of the highlighted (green) row in the chat list, if it is on screen."""
+    """Name of the highlighted (green) row in the chat list. Requires exactly one row
+    whose background is green at several points across its width."""
+    hits = []
     for r in _parse_list(lines, g, None):
-        c = bmp.rep.colorAtX_y_(int((g["list_left"] + 8) * bmp.scale), int(r["_line"].cy * bmp.scale))
-        if c is not None and c.greenComponent() > 0.55 and c.redComponent() < 0.5 and c.blueComponent() < 0.6:
-            return r["name"]
-    return None
+        ys = (r["_line"].y - 4, r["_line"].cy + 12)
+        xs = (g["list_left"] + 6, g["list_left"] + 200, g["list_right"] - 12)
+        if all(_is_highlight(bmp.rep.colorAtX_y_(int(x * bmp.scale), int(y * bmp.scale))) for x in xs for y in ys):
+            hits.append(r["name"])
+    return hits[0] if len(hits) == 1 else None
 
 
 def verify_open(name: str, maybe_group: bool) -> dict:
@@ -252,36 +261,71 @@ def verify_open(name: str, maybe_group: bool) -> dict:
 
 def open_from_list(name: str, pages: int = 5) -> dict:
     """Open a chat by clicking its row in the chat list (exact name match).
+    Scans every page first and refuses if more than one row has the name.
     Useful when search cannot find it, e.g. one-character names."""
     g = ensure_layout()
     core.key(core.K_ESC)
     time.sleep(0.2)
     x, y = (g["list_left"] + g["list_right"]) / 2, (g["list_top"] + g["list_bottom"]) / 2
-    core.scroll(g["info"], x, y, 200)
-    time.sleep(0.5)
-    for i in range(max(1, min(pages, 20))):
-        lines, _, bmp = core.capture()
-        rows = [r for r in _parse_list(lines, g, None) if norm(r["name"]) == norm(name)]
-        if len(rows) > 1:
-            return {"ok": False, "error": f"{len(rows)} chat-list rows are named {name!r}; refusing to guess"}
-        if rows:
-            ln = rows[0]["_line"]
-            core.click(g["info"], ln.x + 10, ln.cy)
-            time.sleep(1.2)
-            out = verify_open(name, True) | {"section": "list"}
-            if not out["ok"]:
-                out["error"] = f"Could not confirm the opened chat is {name!r} (title read as {out['title']!r})"
-            return out
+    pages = max(1, min(pages, 20))
+
+    def to_top():
+        core.scroll(g["info"], x, y, 200)
+        time.sleep(0.5)
+
+    to_top()
+    found: list[tuple[int, str]] = []  # (page, preview) of each exact match
+    seen: set = set()
+    prev_sig = None
+    for i in range(pages):
+        lines, _ = core.read_screen()
+        rows = _parse_list(lines, g, None)
+        sig = [(r["name"], r["time"]) for r in rows]
+        if sig == prev_sig:
+            break  # end of the list
+        prev_sig = sig
+        for r in rows:
+            k = (r["name"], r["time"], r["preview"])
+            if k in seen:
+                continue  # same row seen on the previous page (screens overlap)
+            seen.add(k)
+            if norm(r["name"]) == norm(name):
+                found.append((i, r["preview"]))
         core.scroll(g["info"], x, y, -8)
         time.sleep(0.5)
-    return {"ok": False, "error": f"No chat-list row named {name!r} in the first {pages} screens"}
+    if len(found) != 1:
+        to_top()
+        why = f"No chat-list row named {name!r} in the first {pages} screens" if not found \
+            else f"{len(found)} chat-list rows are named {name!r}; refusing to guess"
+        return {"ok": False, "error": why}
+    page = found[0][0]
+    to_top()
+    for _ in range(page):
+        core.scroll(g["info"], x, y, -8)
+        time.sleep(0.5)
+    lines, _ = core.read_screen()
+    rows = [r for r in _parse_list(lines, g, None) if norm(r["name"]) == norm(name)]
+    if len(rows) != 1:
+        return {"ok": False, "error": f"Lost track of the {name!r} row while scrolling; not opened"}
+    ln = rows[0]["_line"]
+    core.click(g["info"], ln.x + 10, ln.cy)
+    time.sleep(1.2)
+    out = verify_open(name, True) | {"section": "list"}
+    if not out["ok"] and out["title"] is None:
+        # The first click can land while the search box still has focus; click the same row once more.
+        core.click(g["info"], ln.x + 10, ln.cy)
+        time.sleep(1.2)
+        out = verify_open(name, True) | {"section": "list"}
+    if not out["ok"]:
+        out["error"] = f"Could not confirm the opened chat is {name!r} (title read as {out['title']!r})"
+    return out
 
 
-def _open(name: str, from_list: bool) -> dict:
+def _open(name: str, from_list: bool, allow_fallback: bool = True) -> dict:
     if from_list:
         return open_from_list(name)
     r = open_chat(name)
-    if not r["ok"] and str(r.get("error", "")).startswith("No exact contact or group"):
+    if allow_fallback and not r["ok"] and str(r.get("error", "")).startswith("No exact contact or group"):
         # Search misses some names (e.g. one-character names OCR can't read in the popup);
         # fall back to the chat list, which also requires an exact match and verifies the result.
         alt = open_from_list(name)
@@ -565,7 +609,7 @@ def _recheck_title(name: str, r: dict) -> tuple[list[Line], dict] | None:
 
 def send_text(name: str, text: str, from_list: bool = False) -> dict:
     check_text(text)
-    r = _open(name, from_list)
+    r = _open(name, from_list, allow_fallback=False)  # sends use the list only when asked explicitly
     if not r["ok"]:
         return {k: v for k, v in r.items() if k not in ("lines", "g")} | {"sent": False}
     g = r["g"]
@@ -598,7 +642,7 @@ def send_file(name: str, path: str, expected_sha256: str | None = None, from_lis
     if expected_sha256 and file_identity(path) != expected_sha256:
         raise WeChatError("File changed after it was confirmed; not sent")
     base = os.path.basename(path)
-    r = _open(name, from_list)
+    r = _open(name, from_list, allow_fallback=False)
     if not r["ok"]:
         return {k: v for k, v in r.items() if k not in ("lines", "g")} | {"sent": False}
     g = r["g"]
