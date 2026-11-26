@@ -6,7 +6,7 @@ import json
 import sys
 
 from . import chats, core
-from .mcp_server import user_confirms
+from .mcp_server import dialog_enabled, user_confirms
 
 
 def _print_messages(out: dict) -> None:
@@ -38,7 +38,7 @@ def main() -> None:
     g.add_argument("--text")
     g.add_argument("--text-file", help="Read the message text from this file")
     g.add_argument("--attach", help="Send this file (photo, video or document)")
-    s.add_argument("--yes", action="store_true", help="Required to proceed to the confirm dialog")
+    s.add_argument("--yes", action="store_true", help="Required: confirms this exact text/file was approved")
     for sp in (ls, se, r):
         sp.add_argument("--json", action="store_true")
     a = p.parse_args()
@@ -72,11 +72,11 @@ def main() -> None:
                 open(a.text_file, encoding="utf-8").read().rstrip("\n") if a.text_file else None)
             what = text if text is not None else f"file {a.attach}"
             if not a.yes:
-                print(f"Would send to {a.chat!r}:\n---\n{what}\n---\nRe-run with --yes to get the confirm dialog.")
+                print(f"Would send to {a.chat!r}:\n---\n{what}\n---\nRe-run with --yes to send.")
                 sys.exit(2)
             src = chats.check_file(a.attach) if text is None else None
             snap, sha = chats.snapshot_file(src) if text is None else (None, None)
-            if not user_confirms(a.chat, text=text, file_path=snap, source=src):
+            if dialog_enabled() and not user_confirms(a.chat, text=text, file_path=snap, source=src):
                 print(json.dumps({"ok": False, "sent": False, "error": "Not confirmed in the macOS dialog"}))
                 sys.exit(1)
             out = chats.send_text(a.chat, text) if text is not None else chats.send_file(a.chat, snap, expected_sha256=sha)

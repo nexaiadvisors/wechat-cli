@@ -121,10 +121,35 @@ def _open_search(g: dict, query: str) -> list[Line]:
     return lines
 
 
+def _popup_rect(g: dict) -> tuple[float, float, float, float] | None:
+    """Window-relative frame of WeChat's search-results popup (a separate window).
+    Lines outside it are the chat list showing underneath, which must not count as results."""
+    info = g["info"]
+    pid = core._running_app().processIdentifier()
+    best = None
+    for w in core.Quartz.CGWindowListCopyWindowInfo(core.Quartz.kCGWindowListOptionOnScreenOnly,
+                                                    core.Quartz.kCGNullWindowID):
+        if w.get("kCGWindowOwnerPID") != pid or w.get("kCGWindowNumber") == info["id"]:
+            continue
+        b = w["kCGWindowBounds"]
+        x, y, ww, hh = b["X"] - info["x"], b["Y"] - info["y"], b["Width"], b["Height"]
+        # The popup sits over the chat list, starting near the top of the window.
+        if ww >= 200 and hh >= 60 and abs(x - g["list_left"]) < 60 and -10 < y < g["list_top"] + 40:
+            if best is None or ww * hh > best[2] * best[3]:
+                best = (x, y, ww, hh)
+    return best
+
+
 def _parse_search(lines: list[Line], g: dict) -> list[dict]:
     left, right = g["list_left"], g["list_right"] + 40
+    top, bottom = g["list_top"] - 5, g["list_bottom"]
+    pop = _popup_rect(g)
+    if pop is not None:
+        left, right = pop[0], pop[0] + pop[2]
+        top, bottom = max(top, pop[1]), pop[1] + pop[3]
     out, section = [], None
-    for l in sorted([l for l in lines if left <= l.x <= right and l.y > g["list_top"] - 5], key=lambda l: (l.y, l.x)):
+    for l in sorted([l for l in lines if left - 2 <= l.x <= right and top < l.y < bottom],
+                    key=lambda l: (l.y, l.x)):
         t = norm(l.text)
         tc = t.casefold()
         if l.x < left + 45:
@@ -175,6 +200,11 @@ def open_chat(name: str) -> dict:
     g = ensure_layout()
     res = _parse_search(_open_search(g, name), g)
     exact = [r for r in res if norm(r["name"]) == norm(name)]
+    # "Most used" repeats a contact or group that is also listed in its own section;
+    # those entries are the same chat, not two chats with one name.
+    if len(exact) > 1 and len({r["section"] for r in exact}) == len(exact) \
+            and len([r for r in exact if r["section"] != "most_used"]) <= 1:
+        exact = [next((r for r in exact if r["section"] != "most_used"), exact[0])]
     if len(exact) != 1:
         core.key(core.K_ESC)
         why = "No exact contact or group" if not exact else f"{len(exact)} chats share the exact name"

@@ -1,8 +1,9 @@
 """MCP server for WeChat for Mac (screen reading). Reading is free; sending is two steps.
 
-wechat_prepare_send returns a one-time token and the exact preview.
-wechat_send_message needs that token, then shows a native macOS dialog on the
-Mac; nothing is sent unless a person clicks Send there.
+wechat_prepare_send returns a one-time token and the exact preview, which the
+agent must show to the user and get their explicit OK for in chat.
+wechat_send_message needs that token. Optionally (WECHAT_CONFIRM_DIALOG=1) it also
+shows a native macOS dialog that only a person can click.
 """
 from __future__ import annotations
 
@@ -21,6 +22,11 @@ from . import chats, core
 mcp = FastMCP("WeChat (local, screen-reading)")
 STATE = Path.home() / "Library/Application Support/wechat-cli"
 TTL = 600
+
+
+def dialog_enabled() -> bool:
+    """Opt-in second approval on the Mac itself. Off by default: approval happens in chat."""
+    return os.environ.get("WECHAT_CONFIRM_DIALOG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _digest(chat: str, text: str | None, file_path: str | None) -> str:
@@ -86,15 +92,17 @@ def wechat_prepare_send(chat_name: str, text: str | None = None, file_path: str 
     return {"ok": True, "token": token, "chat_name": chat_name, "text": text,
             "file_path": file_path, "file_note": "file_path is a private snapshot copy; pass it unchanged to wechat_send_message",
             "expires_in_s": TTL,
-            "next": "Show this exact chat and content to the user. Call wechat_send_message only after they approve; "
-                    "they will also confirm in a dialog on the Mac."}
+            "next": "Show this exact chat and content to the user word for word. Call wechat_send_message only after "
+                    "the user explicitly approves this exact content in the conversation."
+                    + (" They will also confirm in a dialog on the Mac." if dialog_enabled() else "")}
 
 
 @mcp.tool()
 def wechat_send_message(token: str, chat_name: str, text: str | None = None, file_path: str | None = None) -> dict:
-    """Step 2: send what the user approved. Needs the token from wechat_prepare_send and the
-    same chat_name and text/file_path. Shows a macOS dialog; only a person clicking Send
-    proceeds. Verifies the chat title before typing and checks the result on screen."""
+    """Step 2: send what the user approved. Call ONLY after the user explicitly approved this
+    exact chat and content in the conversation. Needs the token from wechat_prepare_send and
+    the same chat_name and text/file_path. Verifies the chat title before typing and checks
+    the result on screen. If WECHAT_CONFIRM_DIALOG=1, a person must also click Send on the Mac."""
     f = STATE / f"{os.path.basename(token)}.json"
     if not f.exists():
         return {"ok": False, "sent": False, "error": "Unknown or used token; call wechat_prepare_send first"}
@@ -112,7 +120,8 @@ def wechat_send_message(token: str, chat_name: str, text: str | None = None, fil
     try:
         if file_path and chats.file_identity(chats.check_file(file_path)) != rec.get("sha256"):
             return {"ok": False, "sent": False, "error": "File changed since wechat_prepare_send; not sent"}
-        if not user_confirms(chat_name, text=text, file_path=file_path, source=rec.get("source")):
+        if dialog_enabled() and not user_confirms(chat_name, text=text, file_path=file_path,
+                                                  source=rec.get("source")):
             return {"ok": False, "sent": False, "error": "User did not confirm in the macOS dialog; not sent"}
         if text:
             return chats.send_text(chat_name, text)

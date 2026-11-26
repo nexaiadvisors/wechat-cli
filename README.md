@@ -25,16 +25,22 @@ Listing and searching open no chat, so nothing is marked as read. Reading a chat
 
 Not supported: voice/video calls, payments and red packets, Moments, adding contacts.
 
-## Every send needs a human click
+## Every send needs your approval
 
-Sending is the dangerous part, so the tool makes it hard to do by accident or by prompt injection:
+Sending is the risky part, so the tool makes it hard to do by accident:
 
-1. **Preview.** `wechat_prepare_send` returns the exact chat and content plus a one-time token (valid 10 minutes). The agent is told to show this to you and wait for your OK.
-2. **Native confirm dialog.** `wechat_send_message` (and `wechat send` in the CLI) pops a macOS dialog on the Mac showing the chat and exact text (or file name, size and source path). **Nothing is sent unless a person clicks Send.** An agent cannot click it for you.
-3. **Exact recipient.** A chat opens only when exactly one contact or group matches the name exactly (case-sensitive). Zero or several matches → refused, with the candidates listed.
+1. **Preview, then your OK.** `wechat_prepare_send` returns the exact chat and content plus a one-time token (valid 10 minutes). The agent is told to show this to you word for word and send only after you approve that exact content in the conversation. The token only works for the same chat and the same text or file.
+2. **Optional second approval on the Mac.** Set `WECHAT_CONFIRM_DIALOG=1` and every send also pops a native macOS dialog showing the chat and exact text (or file name, size and source path). Nothing goes out unless a person clicks Send there, so even an agent that ignores instructions, or text hidden in a message it read, cannot send on its own. It is off by default because a pop-up per message gets tedious; turn it on if the agent runs unattended or reads untrusted content.
+3. **Exact recipient.** A chat opens only when exactly one contact or group matches the name exactly (case-sensitive). Zero or several different matches → refused, with the candidates listed. (The same chat appearing under both "Most used" and "Contacts" counts as one.)
 4. **Checks before and after.** The chat title is verified by OCR before typing and again right before pressing Send; the pasted text must be visible in the input box; afterwards the new bubble is checked on screen.
-5. **Content limits.** Text over 1,200 characters or 25 lines, consecutive blank lines, or hidden/control Unicode characters are refused (the dialog must be able to show exactly what goes out). Files over 100 MB and symlinks are refused; a private read-only copy of the file is what gets confirmed and sent, so it cannot change in between.
+5. **Content limits.** Text over 1,200 characters or 25 lines, consecutive blank lines, or hidden/control Unicode characters are refused. Files over 100 MB and symlinks are refused; a private read-only copy of the file is what gets sent, so it cannot change in between.
 6. **Hands off.** It waits until nobody has touched the keyboard or mouse for 3 seconds, stops if WeChat loses focus before typing, and restores your clipboard afterwards.
+
+To turn the dialog on for Claude Code:
+
+```bash
+claude mcp add --scope user wechat -e WECHAT_CONFIRM_DIALOG=1 -- uv --directory "$(pwd)" run wechat-mcp-local
+```
 
 ## Requirements
 
@@ -72,7 +78,7 @@ uv run wechat send "Alice" --text "Running 10 minutes late" --yes
 uv run wechat send "Project Team" --attach ~/Desktop/plan.pdf --yes
 ```
 
-`send` without `--yes` only prints what it would send.
+`send` without `--yes` only prints what it would send. With `WECHAT_CONFIRM_DIALOG=1` set, `--yes` is followed by the macOS dialog.
 
 ## How it behaves on your Mac
 
