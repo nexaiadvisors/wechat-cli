@@ -275,7 +275,7 @@ def open_from_list(name: str, pages: int = 5) -> dict:
 
     to_top()
     found: list[tuple[int, str]] = []  # (page, preview) of each exact match
-    seen: set = set()
+    prev_keys: list = []
     prev_sig = None
     for i in range(pages):
         lines, _ = core.read_screen()
@@ -284,13 +284,17 @@ def open_from_list(name: str, pages: int = 5) -> dict:
         if sig == prev_sig:
             break  # end of the list
         prev_sig = sig
-        for r in rows:
-            k = (r["name"], r["time"], r["preview"])
-            if k in seen:
-                continue  # same row seen on the previous page (screens overlap)
-            seen.add(k)
+        keys = [(r["name"], r["time"], r["preview"]) for r in rows]
+        # Screens overlap: skip only the leading rows that repeat the previous page's tail.
+        skip = 0
+        for k in range(min(len(prev_keys), len(keys)), 0, -1):
+            if prev_keys[-k:] == keys[:k]:
+                skip = k
+                break
+        for r in rows[skip:]:
             if norm(r["name"]) == norm(name):
                 found.append((i, r["preview"]))
+        prev_keys = keys
         core.scroll(g["info"], x, y, -8)
         time.sleep(0.5)
     if len(found) != 1:
