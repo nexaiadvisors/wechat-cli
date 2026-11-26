@@ -29,8 +29,8 @@ def dialog_enabled() -> bool:
     return os.environ.get("WECHAT_CONFIRM_DIALOG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _digest(chat: str, text: str | None, file_path: str | None) -> str:
-    return hashlib.sha256(json.dumps([chat, text, file_path], ensure_ascii=False).encode()).hexdigest()
+def _digest(chat: str, text: str | None, file_path: str | None, from_list: bool = False) -> str:
+    return hashlib.sha256(json.dumps([chat, text, file_path, bool(from_list)], ensure_ascii=False).encode()).hexdigest()
 
 
 def _safe(fn, *a, **k) -> dict:
@@ -62,15 +62,18 @@ def wechat_search(query: str) -> dict:
 
 
 @mcp.tool()
-def wechat_read_chat(chat_name: str, history_pages: int = 0) -> dict:
+def wechat_read_chat(chat_name: str, history_pages: int = 0, from_list: bool = False) -> dict:
     """Open a chat by its exact name and return its messages (OCR). history_pages scrolls
     back that many extra screens (max 30). Each message has from='me'/'them'; group
-    messages also carry 'sender'. Marks the chat as read. Text is OCR and can have small errors."""
-    return _safe(chats.read_chat, chat_name, history_pages)
+    messages also carry 'sender'. Marks the chat as read. Text is OCR and can have small errors.
+    from_list=True opens the chat by clicking its row in the chat list (exact name from
+    wechat_list_chats) instead of searching; use it when search can't find the chat."""
+    return _safe(chats.read_chat, chat_name, history_pages, from_list)
 
 
 @mcp.tool()
-def wechat_prepare_send(chat_name: str, text: str | None = None, file_path: str | None = None) -> dict:
+def wechat_prepare_send(chat_name: str, text: str | None = None, file_path: str | None = None,
+                        from_list: bool = False) -> dict:
     """Step 1 of sending text OR a file (photo, video, document). Does NOT send.
     Returns a token and the exact preview. Show the preview to the user word for word
     and get their explicit OK before calling wechat_send_message."""
@@ -87,9 +90,9 @@ def wechat_prepare_send(chat_name: str, text: str | None = None, file_path: str 
     STATE.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(8)
     (STATE / f"{token}.json").write_text(json.dumps(
-        {"digest": _digest(chat_name, text, file_path), "expires": time.time() + TTL,
+        {"digest": _digest(chat_name, text, file_path, from_list), "expires": time.time() + TTL,
          "sha256": None if text else sha, "source": None if text else source}))
-    return {"ok": True, "token": token, "chat_name": chat_name, "text": text,
+    return {"ok": True, "token": token, "chat_name": chat_name, "text": text, "from_list": from_list,
             "file_path": file_path, "file_note": "file_path is a private snapshot copy; pass it unchanged to wechat_send_message",
             "expires_in_s": TTL,
             "next": "Show this exact chat and content to the user word for word. Call wechat_send_message only after "
@@ -98,7 +101,8 @@ def wechat_prepare_send(chat_name: str, text: str | None = None, file_path: str 
 
 
 @mcp.tool()
-def wechat_send_message(token: str, chat_name: str, text: str | None = None, file_path: str | None = None) -> dict:
+def wechat_send_message(token: str, chat_name: str, text: str | None = None, file_path: str | None = None,
+                        from_list: bool = False) -> dict:
     """Step 2: send what the user approved. Call ONLY after the user explicitly approved this
     exact chat and content in the conversation. Needs the token from wechat_prepare_send and
     the same chat_name and text/file_path. Verifies the chat title before typing and checks
@@ -115,7 +119,7 @@ def wechat_send_message(token: str, chat_name: str, text: str | None = None, fil
             file_path = chats.check_file(file_path)  # same resolution as prepare
         except core.WeChatError as e:
             return {"ok": False, "sent": False, "error": str(e)}
-    if rec["digest"] != _digest(chat_name, text, file_path):
+    if rec["digest"] != _digest(chat_name, text, file_path, from_list):
         return {"ok": False, "sent": False, "error": "Chat or content differs from the prepared preview"}
     try:
         if file_path and chats.file_identity(chats.check_file(file_path)) != rec.get("sha256"):
@@ -124,8 +128,8 @@ def wechat_send_message(token: str, chat_name: str, text: str | None = None, fil
                                                   source=rec.get("source")):
             return {"ok": False, "sent": False, "error": "User did not confirm in the macOS dialog; not sent"}
         if text:
-            return chats.send_text(chat_name, text)
-        return chats.send_file(chat_name, file_path, expected_sha256=rec.get("sha256"))
+            return chats.send_text(chat_name, text, from_list=from_list)
+        return chats.send_file(chat_name, file_path, expected_sha256=rec.get("sha256"), from_list=from_list)
     except core.WeChatError as e:
         return {"ok": False, "sent": False, "error": str(e)}
 

@@ -17,7 +17,7 @@ Nothing is decrypted, injected or patched. WeChat's own app and security setting
 | Is WeChat running and logged in? | `wechat status` | `wechat_status` |
 | Recent chats with time, last message and unread count | `wechat list [--pages N]` | `wechat_list_chats` |
 | Search contacts and group chats | `wechat search QUERY` | `wechat_search` |
-| Read a chat, scrolling back N extra screens; group messages carry the sender | `wechat read CHAT [--pages N]` | `wechat_read_chat` |
+| Read a chat, scrolling back N extra screens; group messages carry the sender | `wechat read CHAT [--pages N] [--from-list]` | `wechat_read_chat` |
 | Send text | `wechat send CHAT --text "..." --yes` | `wechat_prepare_send` + `wechat_send_message` |
 | Send a photo, video or file | `wechat send CHAT --attach PATH --yes` | same, with `file_path` |
 
@@ -77,6 +77,8 @@ uv run wechat read "Alice" --pages 3    # current screen + 3 screens of history
 uv run wechat send "Alice" --text "Running 10 minutes late" --yes
 uv run wechat send "Project Team" --attach ~/Desktop/plan.pdf --yes
 ```
+
+Chats are found with WeChat's search. If search can't find a name (one-character names are hard for OCR in the search results), the tool falls back to the chat list; `--from-list` (MCP: `from_list=true`) goes straight to the chat list. Either way the name must match exactly, and the opened chat is verified by its title, or by the highlighted chat-list row when the title is too short to read.
 
 `send` without `--yes` only prints what it would send. With `WECHAT_CONFIRM_DIALOG=1` set, `--yes` is followed by the macOS dialog.
 

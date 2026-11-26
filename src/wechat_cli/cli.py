@@ -32,12 +32,14 @@ def main() -> None:
     r = sub.add_parser("read", help="Open a chat and print its messages")
     r.add_argument("chat", help="Exact contact or group name")
     r.add_argument("--pages", type=int, default=0, help="Extra screens of history to scroll back")
+    r.add_argument("--from-list", action="store_true", help="Open by clicking the chat-list row instead of search")
     s = sub.add_parser("send", help="Send text or a file to a chat")
     s.add_argument("chat", help="Exact contact or group name")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--text")
     g.add_argument("--text-file", help="Read the message text from this file")
     g.add_argument("--attach", help="Send this file (photo, video or document)")
+    s.add_argument("--from-list", action="store_true", help="Open by clicking the chat-list row instead of search")
     s.add_argument("--yes", action="store_true", help="Required: confirms this exact text/file was approved")
     for sp in (ls, se, r):
         sp.add_argument("--json", action="store_true")
@@ -62,7 +64,7 @@ def main() -> None:
                 for x in out["results"]:
                     print(f"{x['section']:10} {x['name']}")
         elif a.cmd == "read":
-            out = chats.read_chat(a.chat, a.pages)
+            out = chats.read_chat(a.chat, a.pages, from_list=a.from_list)
             if a.json or not out.get("ok"):
                 print(json.dumps(out, ensure_ascii=False, indent=2))
             else:
@@ -79,7 +81,8 @@ def main() -> None:
             if dialog_enabled() and not user_confirms(a.chat, text=text, file_path=snap, source=src):
                 print(json.dumps({"ok": False, "sent": False, "error": "Not confirmed in the macOS dialog"}))
                 sys.exit(1)
-            out = chats.send_text(a.chat, text) if text is not None else chats.send_file(a.chat, snap, expected_sha256=sha)
+            out = (chats.send_text(a.chat, text, from_list=a.from_list) if text is not None
+                   else chats.send_file(a.chat, snap, expected_sha256=sha, from_list=a.from_list))
             print(json.dumps(out, ensure_ascii=False))
     except core.WeChatError as e:
         print(json.dumps({"ok": False, "error": str(e)}))

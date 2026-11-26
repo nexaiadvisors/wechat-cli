@@ -152,13 +152,18 @@ def _parse_search(lines: list[Line], g: dict) -> list[dict]:
                     key=lambda l: (l.y, l.x)):
         t = norm(l.text)
         tc = t.casefold()
-        if l.x < left + 45:
-            if tc in TARGET_SECTIONS:
-                section = ("contact" if tc in ("contacts", "联系人") else
-                           "group" if tc in ("groupchats", "群聊") else "most_used")
-            elif tc in OTHER_SECTIONS:
-                section = None
+        if tc in OTHER_SECTIONS:
+            section = None  # e.g. "Internet search results" sits further right (after an icon)
             continue
+        if l.x < left + 60 and tc in TARGET_SECTIONS:
+            section = ("contact" if tc in ("contacts", "联系人") else
+                       "group" if tc in ("groupchats", "群聊") else "most_used")
+            continue
+        if section is not None and l.x > left + 250 and TIME_RE.match(l.text.strip()):
+            section = None  # a date at the right edge: chat-list rows showing below the popup
+            continue
+        if l.x < left + 60:
+            continue  # other header-column text
         if section is None or l.x > left + 90:
             continue  # only the name column (not member lists or dates)
         if tc.startswith("include:") or t.startswith("包含"):
@@ -213,16 +218,76 @@ def open_chat(name: str) -> dict:
     hit = exact[0]
     core.click(g["info"], hit["line"].x + 15, hit["line"].cy)
     time.sleep(1.2)
-    g = geometry()
-    lines, _ = core.read_screen()
-    title = chat_title(lines, g)
-    maybe_group = hit["section"] != "contact"
-    is_group = bool(title and re.search(r"\(\d+\)$", norm(title)))
-    ok = _title_matches(title, name, maybe_group)
-    out = {"ok": ok, "title": title, "is_group": is_group, "section": hit["section"], "lines": lines, "g": g}
-    if not ok:
-        out["error"] = f"Opened chat title {title!r} does not match {name!r}"
+    out = verify_open(name, hit["section"] != "contact") | {"section": hit["section"]}
+    if not out["ok"]:
+        out["error"] = f"Could not confirm the opened chat is {name!r} (title read as {out['title']!r})"
     return out
+
+
+def _selected_row(lines: list[Line], g: dict, bmp) -> str | None:
+    """Name of the highlighted (green) row in the chat list, if it is on screen."""
+    for r in _parse_list(lines, g, None):
+        c = bmp.rep.colorAtX_y_(int((g["list_left"] + 8) * bmp.scale), int(r["_line"].cy * bmp.scale))
+        if c is not None and c.greenComponent() > 0.55 and c.redComponent() < 0.5 and c.blueComponent() < 0.6:
+            return r["name"]
+    return None
+
+
+def verify_open(name: str, maybe_group: bool) -> dict:
+    """Confirm the open chat is `name`: by the title, or, when the title can't be read
+    (OCR often misses a one-character title), by the highlighted chat-list row."""
+    g = geometry()
+    lines, _, bmp = core.capture()
+    title = chat_title(lines, g)
+    ok = _title_matches(title, name, maybe_group)
+    how = "title"
+    if not ok and title is None:
+        sel = _selected_row(lines, g, bmp)
+        ok = sel is not None and norm(sel) == norm(name)
+        how = "highlighted row"
+        title = sel if ok else None
+    is_group = bool(title and re.search(r"\(\d+\)$", norm(title)))
+    return {"ok": ok, "title": title, "verified_by": how, "is_group": is_group, "lines": lines, "g": g}
+
+
+def open_from_list(name: str, pages: int = 5) -> dict:
+    """Open a chat by clicking its row in the chat list (exact name match).
+    Useful when search cannot find it, e.g. one-character names."""
+    g = ensure_layout()
+    core.key(core.K_ESC)
+    time.sleep(0.2)
+    x, y = (g["list_left"] + g["list_right"]) / 2, (g["list_top"] + g["list_bottom"]) / 2
+    core.scroll(g["info"], x, y, 200)
+    time.sleep(0.5)
+    for i in range(max(1, min(pages, 20))):
+        lines, _, bmp = core.capture()
+        rows = [r for r in _parse_list(lines, g, None) if norm(r["name"]) == norm(name)]
+        if len(rows) > 1:
+            return {"ok": False, "error": f"{len(rows)} chat-list rows are named {name!r}; refusing to guess"}
+        if rows:
+            ln = rows[0]["_line"]
+            core.click(g["info"], ln.x + 10, ln.cy)
+            time.sleep(1.2)
+            out = verify_open(name, True) | {"section": "list"}
+            if not out["ok"]:
+                out["error"] = f"Could not confirm the opened chat is {name!r} (title read as {out['title']!r})"
+            return out
+        core.scroll(g["info"], x, y, -8)
+        time.sleep(0.5)
+    return {"ok": False, "error": f"No chat-list row named {name!r} in the first {pages} screens"}
+
+
+def _open(name: str, from_list: bool) -> dict:
+    if from_list:
+        return open_from_list(name)
+    r = open_chat(name)
+    if not r["ok"] and str(r.get("error", "")).startswith("No exact contact or group"):
+        # Search misses some names (e.g. one-character names OCR can't read in the popup);
+        # fall back to the chat list, which also requires an exact match and verifies the result.
+        alt = open_from_list(name)
+        if alt["ok"]:
+            return alt
+    return r
 
 
 # ---------------------------------------------------------------- messages
@@ -240,7 +305,10 @@ def messages_from_screen(lines: list[Line], g: dict, is_group: bool) -> list[dic
         if centered and re.search(r"(recalled a message|撤回了一条消息|joined the group|加入了群聊|invited|邀请)", l.text):
             msgs.append({"kind": "system", "text": l.text.strip(), "_y": l.y, "_b": l.y + l.h})
             continue
-        side = "me" if l.cx > mid else "them"
+        # Their bubbles start at a fixed indent next to their avatar; mine are right-aligned
+        # and start further right. Using the left edge (not the centre) keeps a short last
+        # line of my long message on my side.
+        side = "them" if l.x < left + 120 else "me"
         prev = msgs[-1] if msgs else None
         same_block = prev and prev["kind"] == "msg" and prev["from"] == side and l.y - prev["_b"] < 12
         if same_block:
@@ -319,9 +387,9 @@ def _merge(older: list[dict], newer: list[dict]) -> list[dict]:
     return older[: len(older) - i] + newer[j + k:] if i else older + newer[j + k:]
 
 
-def read_chat(name: str, pages: int = 0) -> dict:
+def read_chat(name: str, pages: int = 0, from_list: bool = False) -> dict:
     """Open a chat and return visible messages, plus `pages` extra screens of history."""
-    r = open_chat(name)
+    r = _open(name, from_list)
     if not r["ok"]:
         r.pop("lines", None)
         r.pop("g", None)
@@ -364,6 +432,7 @@ def _parse_list(lines: list[Line], g: dict, bmp=None) -> list[dict]:
             n = core.badge_count(bmp, bx0, by0, bx1, by1)
             unread = 0 if n is None else n  # -1: red dot without a number (e.g. muted chat)
         rows.append({
+            "_line": sorted(name, key=lambda l: l.x)[0],
             "name": " ".join(l.text for l in sorted(name, key=lambda l: l.x)),
             "time": t.text.strip(),
             "preview": " ".join(l.text for l in sorted(prev, key=lambda l: l.x)),
@@ -385,6 +454,7 @@ def list_chats(pages: int = 1) -> dict:
         lines, _, bmp = core.capture()
         new = 0
         for r in _parse_list(lines, g, bmp):
+            r.pop("_line", None)
             k = (r["name"], r["time"])
             if k not in seen:
                 seen.add(k)
@@ -489,16 +559,13 @@ def _press_send(g: dict, lines: list[Line]) -> None:
 
 
 def _recheck_title(name: str, r: dict) -> tuple[list[Line], dict] | None:
-    g = geometry()
-    lines, _ = core.read_screen()
-    if not _title_matches(chat_title(lines, g), name, r["section"] != "contact"):
-        return None
-    return lines, g
+    v = verify_open(name, r["section"] != "contact")
+    return (v["lines"], v["g"]) if v["ok"] else None
 
 
-def send_text(name: str, text: str) -> dict:
+def send_text(name: str, text: str, from_list: bool = False) -> dict:
     check_text(text)
-    r = open_chat(name)
+    r = _open(name, from_list)
     if not r["ok"]:
         return {k: v for k, v in r.items() if k not in ("lines", "g")} | {"sent": False}
     g = r["g"]
@@ -525,13 +592,13 @@ def send_text(name: str, text: str) -> dict:
             "title": r["title"]}
 
 
-def send_file(name: str, path: str, expected_sha256: str | None = None) -> dict:
+def send_file(name: str, path: str, expected_sha256: str | None = None, from_list: bool = False) -> dict:
     """Send a photo, video or file. Images paste inline; other files paste as a file card."""
     path = check_file(path)
     if expected_sha256 and file_identity(path) != expected_sha256:
         raise WeChatError("File changed after it was confirmed; not sent")
     base = os.path.basename(path)
-    r = open_chat(name)
+    r = _open(name, from_list)
     if not r["ok"]:
         return {k: v for k, v in r.items() if k not in ("lines", "g")} | {"sent": False}
     g = r["g"]
